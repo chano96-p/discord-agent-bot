@@ -41,6 +41,51 @@ pnpm dev
 
 파일 편집은 작업 공간 안에서 자동 허용(`acceptEdits`), Bash 명령이나 작업 공간 밖 접근은 스레드에 승인 버튼이 뜹니다.
 
+## 상시 구동 (launchd)
+
+로그인하면 자동으로 시작되고, 프로세스가 죽으면 다시 띄웁니다. 실행 중에는 `caffeinate -i`로 유휴 잠자기를 막습니다(뚜껑 닫힘 잠자기는 못 막음).
+
+### 설치 (최초 1회)
+
+프로젝트 루트에서 템플릿의 경로를 이 맥북 값으로 치환해 `~/Library/LaunchAgents/`에 둡니다.
+
+```bash
+sed -e "s|__PNPM__|$(which pnpm)|" \
+    -e "s|__PROJECT_DIR__|$(pwd)|" \
+    -e "s|__NODE_BIN_DIR__|$(dirname "$(which node)")|" \
+    -e "s|__PNPM_BIN_DIR__|$(dirname "$(which pnpm)")|" \
+    -e "s|__CLAUDE_BIN_DIR__|$(dirname "$(which claude)")|" \
+    -e "s|__HOME__|$HOME|g" \
+    launchd/com.agent-bot.plist.example > ~/Library/LaunchAgents/com.agent-bot.plist
+plutil -lint ~/Library/LaunchAgents/com.agent-bot.plist
+pnpm bot:start
+```
+
+- 토큰은 plist에 넣지 말고 지금처럼 `.env`에 둡니다.
+- nvm 등으로 node 버전을 바꾸면 PATH의 node 경로가 달라지므로, `pnpm bot:stop` 후 위 설치를 다시 실행합니다.
+
+### 스크립트
+
+| 명령 | 동작 |
+|---|---|
+| `pnpm bot:restart` | 코드 수정 후 반영 (평소에는 이것만 사용) |
+| `pnpm bot:stop` | launchd 봇 내리기 |
+| `pnpm bot:start` | 다시 올리기. 이미 떠 있으면 에러가 나므로 `bot:stop` 다음에만 사용 |
+
+로그: `tail -f ~/Library/Logs/agent-bot.log`
+
+### `pnpm dev`로 개발할 때
+
+같은 토큰으로 봇이 둘 뜨면 응답과 작업이 중복되므로, launchd 봇을 내린 뒤 실행합니다.
+
+```bash
+pnpm bot:stop && pnpm dev
+# 끝나면 Ctrl+C 후
+pnpm bot:start
+```
+
+`bot:stop`은 현재 로그인 세션에만 적용됩니다. 재로그인·재부팅하면 다시 자동 시작됩니다.
+
 ## 1단계 체크리스트
 
 - [ ] 요청 → 결과 회신
@@ -53,5 +98,4 @@ pnpm dev
 ## 아직 안 한 것 (다음 단계)
 
 - worktree 작업 후 커밋·push·draft PR, 작업 공간 정리
-- launchd 상시 구동
 - 다른 봇 메시지 처리(멘션 필터, 턴 제한) → 2단계
