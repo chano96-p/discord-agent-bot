@@ -24,7 +24,7 @@ src/
 ## 실행
 
 ```bash
-pnpm install            # 또는 npm install
+pnpm install
 cp .env.example .env    # 값 채우기
 cp projects.example.json projects.json   # 태그로 쓸 레포 등록 (선택)
 pnpm dev
