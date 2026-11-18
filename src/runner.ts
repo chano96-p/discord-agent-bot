@@ -38,8 +38,8 @@ export async function runClaude(opts: {
         cwd: workspace.cwd,
         resume,
         model: config.model,
-        // 작업 공간 안의 파일 편집은 자동 허용, 그 외(Bash, 외부 경로 등)는 버튼으로 승인
-        permissionMode: "acceptEdits",
+        // 분류기가 호출마다 허용/거부를 판단하고, 판단이 안 서는 것만 canUseTool(버튼)로 넘어온다
+        permissionMode: "auto",
         canUseTool: makeCanUseTool(thread),
         abortController: abort,
         systemPrompt: {
