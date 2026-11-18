@@ -1,0 +1,7 @@
+{
+  "side": {
+    "repo": "~/work/my-side-project",
+    "base": "origin/main",
+    "install": "pnpm install --frozen-lockfile"
+  }
+}
