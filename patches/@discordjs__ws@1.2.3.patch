@@ -1,0 +1,34 @@
+diff --git a/dist/index.js b/dist/index.js
+index 106b2ec450a248cd5bd7c36c038215145438eade..d784394dedfbf1e3c199ba767e099c57ac002558 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -752,7 +752,11 @@ var WebSocketShard = class extends import_async_event_emitter.AsyncEventEmitter
+         await promise;
+         this.emit("closed" /* Closed */, { code: options.code });
+       }
+-      this.connection.onerror = null;
++      // 리스너를 지우면 연결 중 소켓의 이후 네트워크 에러(terminate 포함)가 미처리 error로 프로세스를 죽인다
++      this.connection.onerror = () => {};
++      if (this.connection.readyState === import_ws.WebSocket.CONNECTING) {
++        this.connection.terminate();
++      }
+     } else {
+       this.debug(["Destroying a shard that has no connection; please open an issue on GitHub"]);
+     }
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 0ebc06d477ac54303c7542261cc5bcc9a9537519..e2a2693d541f431535c7f0c4982ea6ba230bc1b6 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -713,7 +713,11 @@ var WebSocketShard = class extends AsyncEventEmitter {
+         await promise;
+         this.emit("closed" /* Closed */, { code: options.code });
+       }
+-      this.connection.onerror = null;
++      // 리스너를 지우면 연결 중 소켓의 이후 네트워크 에러(terminate 포함)가 미처리 error로 프로세스를 죽인다
++      this.connection.onerror = () => {};
++      if (this.connection.readyState === WebSocket.CONNECTING) {
++        this.connection.terminate();
++      }
+     } else {
+       this.debug(["Destroying a shard that has no connection; please open an issue on GitHub"]);
+     }

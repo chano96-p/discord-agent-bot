@@ -1,2 +1,4 @@
 allowBuilds:
   esbuild: true
+patchedDependencies:
+  '@discordjs/ws@1.2.3': patches/@discordjs__ws@1.2.3.patch
