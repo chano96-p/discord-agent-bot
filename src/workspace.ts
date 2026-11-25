@@ -8,7 +8,7 @@ const run = promisify(execFile);
 
 export type Workspace =
   | { kind: "job"; jobId: string; cwd: string }
-  | { kind: "worktree"; jobId: string; cwd: string; tag: string; repo: string; branch: string };
+  | { kind: "worktree"; jobId: string; cwd: string; tag: string; repo: string; branch: string; base: string };
 
 export function newJobId() {
   const d = new Date();
@@ -42,7 +42,13 @@ export async function prepareWorkspace(tag: string | undefined): Promise<Workspa
   await copyFile(path.join(project.repo, ".env"), path.join(cwd, ".env")).catch(() => {});
   if (project.install) await run("sh", ["-c", project.install], { cwd });
 
-  return { kind: "worktree", jobId, cwd, tag, repo: project.repo, branch };
+  return { kind: "worktree", jobId, cwd, tag, repo: project.repo, branch, base: project.base };
+}
+
+// 원격 브랜치는 PR이 쓰고 있으므로 남기고, worktree 폴더와 로컬 브랜치만 지운다
+export async function removeWorktree(ws: Extract<Workspace, { kind: "worktree" }>) {
+  await run("git", ["worktree", "remove", ws.cwd], { cwd: ws.repo });
+  await run("git", ["branch", "-D", ws.branch], { cwd: ws.repo });
 }
 
 // job 모드: outputs/ 안의 파일 목록 (실행 전후 비교용)

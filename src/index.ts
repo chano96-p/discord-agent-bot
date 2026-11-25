@@ -1,5 +1,6 @@
 import { Client, Events, GatewayIntentBits, type Message, type ThreadChannel } from "discord.js";
 import { config } from "./config.js";
+import { cleanupThread, openPullRequest } from "./pr.js";
 import { JobQueue } from "./queue.js";
 import { sendFiles, sendText } from "./reply.js";
 import { runClaude } from "./runner.js";
@@ -42,7 +43,7 @@ async function onNewRequest(msg: Message) {
   const { tag, prompt } = parseTag(msg.content);
   if (!prompt) return;
   const thread = await msg.startThread({ name: prompt.slice(0, 80) });
-  await enqueue(thread, prompt, tag);
+  await enqueue(thread, () => runJob(thread, prompt, tag));
 }
 
 // 스레드 안 메시지 → 같은 작업 공간·세션으로 이어서 작업
@@ -60,12 +61,19 @@ async function onThreadMessage(msg: Message, thread: ThreadChannel) {
     return;
   }
 
-  if (!sessions.get(thread.id)) return; // 봇이 만든 스레드가 아니면 무시
-  await enqueue(thread, text);
+  const state = sessions.get(thread.id);
+  if (!state) return; // 봇이 만든 스레드가 아니면 무시
+
+  if (text === "!pr") {
+    await enqueue(thread, () => openPullRequest(thread, state));
+    return;
+  }
+
+  await enqueue(thread, () => runJob(thread, text));
 }
 
 // ── 2. 작업 큐 ────────────────────────────────────────────────
-async function enqueue(thread: ThreadChannel, prompt: string, tag?: string) {
+async function enqueue(thread: ThreadChannel, task: () => Promise<void>) {
   if (inFlight.has(thread.id)) {
     await thread.send("이 스레드의 이전 작업이 아직 진행 중이에요. 끝난 뒤 다시 보내주세요.");
     return;
@@ -74,12 +82,16 @@ async function enqueue(thread: ThreadChannel, prompt: string, tag?: string) {
   if (queue.isFull) await thread.send(`⏸️ 대기 중 (대기열 ${queue.pending + 1}번째)`);
 
   queue
-    .run(() => runJob(thread, prompt, tag))
+    .run(task)
     .catch(async (err) => {
       console.error(err);
       await thread.send(`오류: ${(err as Error).message}`).catch(() => {});
     })
-    .finally(() => inFlight.delete(thread.id));
+    .finally(() => {
+      inFlight.delete(thread.id);
+      // 작업 중에 보관된 스레드는 보관 이벤트 때 건너뛰었으므로 지금 정리한다
+      if (thread.archived) void cleanup(thread);
+    });
 }
 
 // ── 3~5. 작업 공간 준비 → Claude 실행 → 세션 저장 → 결과 회신 ─────────
@@ -116,6 +128,26 @@ async function runJob(thread: ThreadChannel, prompt: string, tag?: string) {
     }
   } finally {
     running.delete(thread.id);
+  }
+}
+
+// ── 6. 스레드 보관(닫기·자동 보관) → 작업 공간 정리 ─────────────────
+client.on(Events.ThreadUpdate, async (before, after) => {
+  if (before.archived || !after.archived) return;
+  await cleanup(after);
+});
+
+// 정리 중에도 inFlight로 표시해, 그 사이 들어온 요청이 지워지는 작업 공간에서 실행되지 않게 한다
+async function cleanup(thread: ThreadChannel) {
+  const state = sessions.get(thread.id);
+  if (!state || inFlight.has(thread.id)) return;
+  inFlight.add(thread.id);
+  try {
+    await cleanupThread(thread, state);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    inFlight.delete(thread.id);
   }
 }
 

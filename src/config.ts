@@ -12,7 +12,8 @@ function required(name: string): string {
   return v;
 }
 
-export type Project = { repo: string; base: string; install?: string };
+// ghUser: push·PR을 활성 gh 계정 대신 이 계정으로 한다 (gh auth login으로 등록된 계정이어야 함)
+export type Project = { repo: string; base: string; install?: string; ghUser?: string };
 
 function loadProjects(): Record<string, Project> {
   const file = path.resolve("projects.json");
