@@ -10,6 +10,9 @@ export type ThreadState = {
   prUrl?: string;
   // 마지막으로 push한 커밋. squash 머지 후 원격 브랜치가 지워져도 "push 안 된 커밋"을 정확히 세기 위해 기록한다
   pushedHead?: string;
+  pendingReview?: string; // !review 결과. 다음 작업 요청에 붙여 넘기고 비운다
+  // 직전 리뷰 결과와 그 시점의 작업 트리(tree 객체). 다음 !review는 이후 바뀐 부분만 재리뷰한다
+  lastReview?: { text: string; tree: string };
   cleanupWarned?: boolean; // 보관 시 정리를 못 해 경고를 한 번 보냈는지 (보관/해제 반복 시 중복 경고 방지)
 };
 

@@ -2,6 +2,8 @@ import { Client, Events, GatewayIntentBits, type Message, type ThreadChannel } f
 import { config } from "./config.js";
 import { cleanupThread, openPullRequest } from "./pr.js";
 import { JobQueue } from "./queue.js";
+import { snapshotTree } from "./git.js";
+import { buildReReviewPrompt, buildReviewPrompt, REVIEW_HINT, REVIEW_TOOLS, withReview } from "./review.js";
 import { sendFiles, sendText } from "./reply.js";
 import { runClaude } from "./runner.js";
 import { sessions, type ThreadState } from "./sessions.js";
@@ -69,6 +71,11 @@ async function onThreadMessage(msg: Message, thread: ThreadChannel) {
     return;
   }
 
+  if (text === "!review" || text === "!review all") {
+    await enqueue(thread, () => runReview(thread, text === "!review all"));
+    return;
+  }
+
   await enqueue(thread, () => runJob(thread, text));
 }
 
@@ -109,9 +116,14 @@ async function runJob(thread: ThreadChannel, prompt: string, tag?: string) {
   const abort = new AbortController();
   running.set(thread.id, abort);
 
+  const fullPrompt = state.pendingReview ? withReview(prompt, state.pendingReview) : prompt;
+  if (state.pendingReview) await thread.send("📎 직전 `!review` 결과를 함께 전달했어요.");
+
   try {
-    const result = await runClaude({ prompt, workspace, resume: state.sessionId, thread, abort });
-    if (result.sessionId) sessions.set(thread.id, { ...state, sessionId: result.sessionId });
+    const result = await runClaude({ prompt: fullPrompt, workspace, resume: state.sessionId, thread, abort });
+    // 중단·실패하면 리뷰 결과를 남겨 다음 요청에 다시 붙인다
+    const pendingReview = result.ok ? undefined : state.pendingReview;
+    sessions.set(thread.id, { ...state, sessionId: result.sessionId ?? state.sessionId, pendingReview });
 
     await sendText(thread, result.text);
 
@@ -126,6 +138,39 @@ async function runJob(thread: ThreadChannel, prompt: string, tag?: string) {
         );
       }
     }
+  } finally {
+    running.delete(thread.id);
+  }
+}
+
+// !review: 작업 세션과 분리된 새 세션이 읽기 도구만으로 리뷰한다.
+// 작업 대화를 이어받지 않아야 작업자의 판단에 끌려가지 않는다. 두 번째부터는 직전 리뷰 이후 바뀐 부분만 보고,
+// !review all이면 처음처럼 브랜치 전체를 리뷰한 뒤 그 결과를 다음 재리뷰의 기준으로 삼는다.
+async function runReview(thread: ThreadChannel, full: boolean) {
+  const state = sessions.get(thread.id);
+  const ws = state?.workspace;
+  if (ws?.kind !== "worktree") {
+    await thread.send("`!review`는 `@태그`로 시작한 레포 작업 스레드에서만 쓸 수 있어요.");
+    return;
+  }
+
+  const prev = full ? undefined : state!.lastReview;
+  const tree = await snapshotTree(ws.cwd);
+  const prompt = prev ? await buildReReviewPrompt(ws, prev, tree) : await buildReviewPrompt(ws);
+  if (!prompt) {
+    await thread.send(prev ? "직전 리뷰 이후 바뀐 부분이 없어요." : "리뷰할 변경이 없어요.");
+    return;
+  }
+  if (prev) await thread.send("🔁 직전 리뷰 이후 바뀐 부분만 재리뷰해요.");
+
+  const abort = new AbortController();
+  running.set(thread.id, abort);
+  try {
+    const result = await runClaude({ prompt, workspace: ws, thread, abort, tools: REVIEW_TOOLS, hint: REVIEW_HINT });
+    await sendText(thread, result.text);
+    if (!result.ok) return;
+    sessions.set(thread.id, { ...sessions.get(thread.id)!, pendingReview: result.text, lastReview: { text: result.text, tree } });
+    await thread.send("💬 고칠 내용을 이 스레드에 보내면 위 리뷰를 참고해 작업해요. (예: `HIGH만 고쳐줘`)");
   } finally {
     running.delete(thread.id);
   }

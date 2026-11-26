@@ -54,6 +54,8 @@ async function describeChanges(ws: Worktree, sessionId: string | undefined): Pro
         forkSession: true,
         model: config.model,
         tools: [],
+        // tools는 내장 도구만 비우고 MCP 도구(Slack 전송 등)는 그대로 붙으므로 따로 뺀다
+        strictMcpConfig: true,
         maxTurns: 3,
         outputFormat: { type: "json_schema", schema: DESCRIBE_SCHEMA },
         abortController: abort,

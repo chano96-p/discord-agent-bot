@@ -17,8 +17,10 @@ export async function runClaude(opts: {
   resume?: string;
   thread: ThreadChannel;
   abort: AbortController;
+  tools?: string[]; // 생략하면 Claude Code 기본 도구 전체
+  hint?: string; // 생략하면 작업 공간 종류별 기본 지침
 }): Promise<RunResult> {
-  const { prompt, workspace, resume, thread, abort } = opts;
+  const { prompt, workspace, resume, thread, abort, tools } = opts;
   const status = await thread.send("⏳ 작업 시작");
   const timer = setTimeout(() => abort.abort(), config.jobTimeoutMs);
 
@@ -37,6 +39,9 @@ export async function runClaude(opts: {
       options: {
         cwd: workspace.cwd,
         resume,
+        tools,
+        // tools는 내장 도구만 제한하고 사용자 설정·claude.ai의 MCP 도구(Slack 전송 등)는 그대로 붙으므로, 도구를 제한할 때는 MCP도 뺀다
+        strictMcpConfig: tools !== undefined,
         model: config.model,
         // 분류기가 호출마다 허용/거부를 판단하고, 판단이 안 서는 것만 canUseTool(버튼)로 넘어온다
         permissionMode: "auto",
@@ -45,7 +50,7 @@ export async function runClaude(opts: {
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
-          append: workspace.kind === "job" ? JOB_HINT : WORKTREE_HINT,
+          append: opts.hint ?? (workspace.kind === "job" ? JOB_HINT : WORKTREE_HINT),
         },
       },
     });

@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import { rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -32,6 +35,20 @@ export async function hasUncommitted(cwd: string): Promise<boolean> {
 
 export async function commitCount(cwd: string, range: string): Promise<number> {
   return Number(await git(cwd, "rev-list", "--count", range));
+}
+
+// 커밋하지 않은 변경과 새 파일까지 포함한 작업 트리 상태를 tree 객체로 남긴다.
+// 임시 index를 써서 실제 index·작업 트리는 건드리지 않는다.
+export async function snapshotTree(cwd: string): Promise<string> {
+  const index = path.join(os.tmpdir(), `agent-bot-index-${process.pid}-${Date.now()}`);
+  const env = { GIT_INDEX_FILE: index };
+  try {
+    await exec("git", ["read-tree", "HEAD"], cwd, env);
+    await exec("git", ["add", "-A"], cwd, env);
+    return await exec("git", ["write-tree"], cwd, env);
+  } finally {
+    await rm(index, { force: true });
+  }
 }
 
 export async function commitAll(cwd: string, message: string) {
