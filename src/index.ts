@@ -1,7 +1,16 @@
-import { Client, Events, GatewayIntentBits, MessageFlags, type Message, type ThreadChannel } from "discord.js";
+import {
+  Client,
+  Events,
+  GatewayDispatchEvents,
+  GatewayIntentBits,
+  MessageFlags,
+  type GatewayThreadDeleteDispatchData,
+  type Message,
+  type ThreadChannel,
+} from "discord.js";
 import { FIX_PROMPT, NEXT_LABEL, NEXT_PREFIX, nextButtons, type NextAction } from "./actions.js";
 import { config } from "./config.js";
-import { cleanupThread, openPullRequest } from "./pr.js";
+import { cleanupThread, openPullRequest, type CleanupTarget } from "./pr.js";
 import { JobQueue } from "./queue.js";
 import { snapshotTree } from "./git.js";
 import { buildReReviewPrompt, buildReviewPrompt, REVIEW_HINT, REVIEW_TOOLS, withReview } from "./review.js";
@@ -21,6 +30,8 @@ const client = new Client({
 const queue = new JobQueue(config.maxConcurrent);
 const running = new Map<string, AbortController>(); // threadId → 실행 중인 작업
 const inFlight = new Set<string>(); // 대기 + 실행 중인 스레드
+// 작업·정리 중에 삭제돼 정리를 미룬 스레드. 끝나는 쪽(enqueue·cleanup의 finally)에서 꺼내 정리한다
+const deletedWhileBusy = new Map<string, CleanupTarget>();
 
 // ── 1. 봇 프로세스: 누가, 어디서 보낸 메시지인지 거른다 ─────────────
 function isAllowed(msg: Message): boolean {
@@ -43,7 +54,12 @@ client.on(Events.MessageCreate, async (msg) => {
 
 // 채널에 새 메시지 → 스레드를 열고 새 작업으로 등록
 async function onNewRequest(msg: Message) {
-  const { tag, prompt } = parseTag(msg.content);
+  const { tag, unknownTag, prompt } = parseTag(msg.content);
+  if (unknownTag) {
+    const known = Object.keys(config.projects).map((t) => `\`@${t}\``).join(", ") || "없음";
+    await msg.reply(`등록되지 않은 태그예요: \`@${unknownTag}\`\n등록된 태그: ${known}\n태그 없이 맡기려면 \`@\` 없이 보내주세요.`);
+    return;
+  }
   if (!prompt) return;
   const thread = await msg.startThread({ name: prompt.slice(0, 80) });
   await enqueue(thread, () => runJob(thread, prompt, tag));
@@ -142,8 +158,8 @@ async function enqueue(thread: ThreadChannel, task: () => Promise<void>) {
     })
     .finally(() => {
       inFlight.delete(thread.id);
-      // 작업 중에 보관된 스레드는 보관 이벤트 때 건너뛰었으므로 지금 정리한다
-      if (thread.archived) void cleanup(thread);
+      // 작업 중에 보관·삭제된 스레드는 그 이벤트 때 건너뛰었으므로 지금 정리한다
+      if (!runDeferredDelete(thread.id) && thread.archived) void cleanup({ kind: "archived", thread });
     });
 }
 
@@ -226,23 +242,59 @@ async function runReview(thread: ThreadChannel, full: boolean) {
   }
 }
 
-// ── 6. 스레드 보관(닫기·자동 보관) → 작업 공간 정리 ─────────────────
+// ── 6. 스레드 보관(닫기·자동 보관)·삭제 → 작업 공간 정리 ─────────────────
 client.on(Events.ThreadUpdate, async (before, after) => {
   if (before.archived || !after.archived) return;
-  await cleanup(after);
+  await cleanup({ kind: "archived", thread: after });
 });
 
+// discord.js의 ThreadDelete 이벤트는 캐시에 있는 스레드만 오는데, 보관된 스레드는 4시간 뒤 캐시에서 빠지고
+// 재시작 후에는 아예 없다. 그래서 게이트웨이 패킷을 직접 받는다. 패킷 처리(캐시 제거)보다 먼저 호출된다.
+client.ws.on(GatewayDispatchEvents.ThreadDelete, (d: GatewayThreadDeleteDispatchData) => {
+  onThreadDelete(d).catch(console.error);
+});
+
+async function onThreadDelete(d: GatewayThreadDeleteDispatchData) {
+  // 첫 작업이 작업 공간을 준비하는 중이면 세션이 아직 없으므로 inFlight도 본다
+  if (!sessions.get(d.id) && !inFlight.has(d.id)) return;
+
+  const name = (client.channels.cache.get(d.id) as ThreadChannel | undefined)?.name;
+  const parent = d.parent_id ? client.channels.cache.get(d.parent_id) : undefined;
+  const target: CleanupTarget = {
+    kind: "deleted",
+    threadId: d.id,
+    label: name ? `「${name}」` : `(ID ${d.id})`,
+    notify: parent?.isSendable() ? (content) => parent.send(content) : undefined,
+  };
+
+  // 결과를 보낼 스레드가 없으므로 실행 중인 작업은 멈추고, 끝난 쪽에서 정리한다
+  running.get(d.id)?.abort();
+  if (inFlight.has(d.id)) deletedWhileBusy.set(d.id, target);
+  else await cleanup(target);
+}
+
+function runDeferredDelete(threadId: string): boolean {
+  const target = deletedWhileBusy.get(threadId);
+  if (!target) return false;
+  deletedWhileBusy.delete(threadId);
+  void cleanup(target);
+  return true;
+}
+
 // 정리 중에도 inFlight로 표시해, 그 사이 들어온 요청이 지워지는 작업 공간에서 실행되지 않게 한다
-async function cleanup(thread: ThreadChannel) {
-  const state = sessions.get(thread.id);
-  if (!state || inFlight.has(thread.id)) return;
-  inFlight.add(thread.id);
+async function cleanup(target: CleanupTarget) {
+  const threadId = target.kind === "archived" ? target.thread.id : target.threadId;
+  const state = sessions.get(threadId);
+  if (!state || inFlight.has(threadId)) return;
+  inFlight.add(threadId);
   try {
-    await cleanupThread(thread, state);
+    await cleanupThread(target, state);
   } catch (err) {
     console.error(err);
   } finally {
-    inFlight.delete(thread.id);
+    inFlight.delete(threadId);
+    // 보관 정리 중에 삭제된 경우
+    runDeferredDelete(threadId);
   }
 }
 

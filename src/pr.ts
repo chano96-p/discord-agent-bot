@@ -143,15 +143,22 @@ export async function openPullRequest(thread: ThreadChannel, state: ThreadState)
   await thread.send(`🔗 draft PR을 만들었어요: ${url}`);
 }
 
-// 스레드 보관 시: 커밋·push 안 된 작업이 남아 있으면 지우지 않고 한 번만 경고한다
-export async function cleanupThread(thread: ThreadChannel, state: ThreadState) {
+// 정리할 대상. 보관은 스레드에 경고하고, 삭제는 스레드가 없으므로 부모 채널에 알린다.
+// 삭제는 discord.js 캐시에 없는 스레드도 처리해야 해서 스레드 객체 대신 ID와 알림 함수만 받는다.
+export type CleanupTarget =
+  | { kind: "archived"; thread: ThreadChannel }
+  | { kind: "deleted"; threadId: string; label: string; notify?: (content: string) => Promise<unknown> };
+
+// 스레드 보관·삭제 시: 커밋·push 안 된 작업이 남아 있으면 지우지 않는다
+export async function cleanupThread(target: CleanupTarget, state: ThreadState) {
   const ws = state.workspace;
   if (ws.kind !== "worktree") return;
+  const threadId = target.kind === "archived" ? target.thread.id : target.threadId;
 
   // 폴더가 이미 없으면(수동 삭제, 지난 정리의 부분 실패) 남은 브랜치·기록만 치운다
   if (!existsSync(ws.cwd)) {
     await git(ws.repo, "branch", "-D", ws.branch).catch(() => {});
-    sessions.delete(thread.id);
+    sessions.delete(threadId);
     console.log(`🧹 기록만 정리 (폴더 없음): ${ws.cwd}`);
     return;
   }
@@ -160,16 +167,27 @@ export async function cleanupThread(thread: ThreadChannel, state: ThreadState) {
   const unpushed = dirty ? 0 : await commitCount(ws.cwd, pendingRange(ws, state));
 
   if (dirty || unpushed > 0) {
-    if (state.cleanupWarned) return;
-    sessions.set(thread.id, { ...state, cleanupWarned: true });
     const reason = dirty ? "커밋되지 않은 변경이" : `push되지 않은 커밋 ${unpushed}개가`;
-    await thread.send(
+    if (target.kind === "deleted") {
+      // 이어갈 스레드가 없으므로 기록은 지우고, 작업 공간만 남겨 직접 정리하게 한다
+      sessions.delete(threadId);
+      console.log(`📦 삭제된 스레드의 작업 공간 보존: ${ws.cwd}`);
+      await target.notify?.(
+        `⚠️ 삭제된 스레드 ${target.label}에 ${reason} 남아 있어 작업 공간을 지우지 않았어요.\n` +
+          `폴더: \`${ws.cwd}\`\n브랜치: \`${ws.branch}\`\n` +
+          `필요 없으면 직접 정리해주세요:\n\`\`\`\ngit -C "${ws.repo}" worktree remove --force "${ws.cwd}"\ngit -C "${ws.repo}" branch -D ${ws.branch}\n\`\`\``,
+      );
+      return;
+    }
+    if (state.cleanupWarned) return;
+    sessions.set(threadId, { ...state, cleanupWarned: true });
+    await target.thread.send(
       `⚠️ 스레드가 닫혔지만 ${reason} 남아 있어 작업 공간을 정리하지 않았어요. \`!pr\`로 올린 뒤 다시 닫아주세요.`,
     );
     return;
   }
 
   await removeWorktree(ws);
-  sessions.delete(thread.id);
+  sessions.delete(threadId);
   console.log(`🧹 정리 완료: ${ws.cwd}`);
 }

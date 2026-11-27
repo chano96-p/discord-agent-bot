@@ -17,10 +17,13 @@ export function newJobId() {
 }
 
 // "@side 로그인 폼 고쳐줘" → { tag: "side", prompt: "로그인 폼 고쳐줘" }
-export function parseTag(text: string) {
-  const m = text.match(/^@(\w+)\s+([\s\S]*)$/);
-  if (m && config.projects[m[1]]) return { tag: m[1], prompt: m[2].trim() };
-  return { tag: undefined, prompt: text.trim() };
+// 등록되지 않은 태그는 오타일 가능성이 커서 job 모드로 넘기지 않고 unknownTag로 돌려준다
+export function parseTag(text: string): { tag?: string; unknownTag?: string; prompt: string } {
+  const m = text.match(/^@([\p{L}\p{N}_-]+)(?:\s+([\s\S]*))?$/u);
+  if (!m) return { prompt: text.trim() };
+  const prompt = (m[2] ?? "").trim();
+  if (config.projects[m[1]]) return { tag: m[1], prompt };
+  return { unknownTag: m[1], prompt };
 }
 
 export async function prepareWorkspace(tag: string | undefined): Promise<Workspace> {
