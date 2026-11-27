@@ -1,4 +1,5 @@
-import { Client, Events, GatewayIntentBits, type Message, type ThreadChannel } from "discord.js";
+import { Client, Events, GatewayIntentBits, MessageFlags, type Message, type ThreadChannel } from "discord.js";
+import { FIX_PROMPT, NEXT_LABEL, NEXT_PREFIX, nextButtons, type NextAction } from "./actions.js";
 import { config } from "./config.js";
 import { cleanupThread, openPullRequest } from "./pr.js";
 import { JobQueue } from "./queue.js";
@@ -66,18 +67,63 @@ async function onThreadMessage(msg: Message, thread: ThreadChannel) {
   const state = sessions.get(thread.id);
   if (!state) return; // 봇이 만든 스레드가 아니면 무시
 
-  if (text === "!pr") {
-    await enqueue(thread, () => openPullRequest(thread, state));
-    return;
-  }
+  if (text === "!pr") return runAction(thread, "pr");
+  if (text === "!review") return runAction(thread, "review");
 
-  if (text === "!review" || text === "!review all") {
-    await enqueue(thread, () => runReview(thread, text === "!review all"));
+  if (text === "!review all") {
+    await enqueue(thread, () => runReview(thread, true));
     return;
   }
 
   await enqueue(thread, () => runJob(thread, text));
 }
+
+// 명령 입력과 다음 행동 버튼이 같은 경로로 실행된다
+async function runAction(thread: ThreadChannel, action: NextAction) {
+  if (action === "review") return enqueue(thread, () => runReview(thread, false));
+  if (action === "fix") {
+    // 이전 리뷰 메시지의 버튼을 누른 경우: 리뷰 결과가 이미 다음 요청에 쓰였으면 고칠 기준이 없다
+    if (!sessions.get(thread.id)?.pendingReview) {
+      await thread.send("넘길 리뷰 결과가 없어요. `!review`로 다시 리뷰하거나 고칠 내용을 직접 보내주세요.");
+      return;
+    }
+    return enqueue(thread, () => runJob(thread, FIX_PROMPT));
+  }
+  if (action === "pr") {
+    // 대기열에서 기다리는 동안 상태가 바뀔 수 있으므로 실행 시점에 읽는다
+    return enqueue(thread, () => openPullRequest(thread, sessions.get(thread.id)!));
+  }
+}
+
+client.on(Events.InteractionCreate, async (i) => {
+  if (!i.isButton() || !i.customId.startsWith(NEXT_PREFIX)) return;
+  // 리스너의 예외는 미처리 rejection으로 프로세스를 죽이므로 응답 실패도 잡는다
+  const notice = (content: string) => i.reply({ content, flags: MessageFlags.Ephemeral }).catch(console.error);
+
+  if (!config.ownerIds.has(i.user.id)) return notice("이 봇의 소유자만 누를 수 있어요.");
+  const thread = i.channel;
+  if (!thread?.isThread()) return;
+
+  const action = i.customId.slice(NEXT_PREFIX.length) as NextAction;
+  // 재시작 전 메시지에 남은, 이름이 바뀌었거나 없어진 버튼
+  if (!Object.hasOwn(NEXT_LABEL, action)) return notice("더 이상 쓰지 않는 버튼이에요.");
+  // 진행 중이면 버튼을 지우지 않고 남겨, 끝난 뒤 다시 누를 수 있게 한다
+  if (inFlight.has(thread.id)) return notice("이 스레드의 이전 작업이 아직 진행 중이에요. 끝난 뒤 다시 눌러주세요.");
+
+  try {
+    // 버튼을 지워 두 번 누르지 않게 하고, 무엇을 골랐는지 남긴다
+    await i.update({ content: `${i.message.content}\n→ ${NEXT_LABEL[action]}`, components: [] });
+
+    if (!sessions.get(thread.id)) {
+      await thread.send("작업 공간이 이미 정리된 스레드예요.");
+      return;
+    }
+    await runAction(thread, action);
+  } catch (err) {
+    console.error(err);
+    await thread.send(`오류: ${(err as Error).message}`).catch(() => {});
+  }
+});
 
 // ── 2. 작업 큐 ────────────────────────────────────────────────
 async function enqueue(thread: ThreadChannel, task: () => Promise<void>) {
@@ -133,9 +179,10 @@ async function runJob(thread: ThreadChannel, prompt: string, tag?: string) {
     if (workspace.kind === "worktree") {
       const stat = await diffStat(workspace);
       if (stat) {
-        await thread.send(
-          `변경된 파일 (브랜치 \`${workspace.branch}\`)\n\`\`\`\n${stat.slice(0, 1500)}\n\`\`\``,
-        );
+        await thread.send({
+          content: `변경된 파일 (브랜치 \`${workspace.branch}\`)\n\`\`\`\n${stat.slice(0, 1500)}\n\`\`\``,
+          components: [nextButtons(["review", "pr"])],
+        });
       }
     }
   } finally {
@@ -170,7 +217,10 @@ async function runReview(thread: ThreadChannel, full: boolean) {
     await sendText(thread, result.text);
     if (!result.ok) return;
     sessions.set(thread.id, { ...sessions.get(thread.id)!, pendingReview: result.text, lastReview: { text: result.text, tree } });
-    await thread.send("💬 고칠 내용을 이 스레드에 보내면 위 리뷰를 참고해 작업해요. (예: `HIGH만 고쳐줘`)");
+    await thread.send({
+      content: "💬 버튼을 누르거나, 고칠 내용을 직접 보내면 위 리뷰를 참고해 작업해요. (예: `HIGH만 고쳐줘`)",
+      components: [nextButtons(["fix", "pr"])],
+    });
   } finally {
     running.delete(thread.id);
   }
